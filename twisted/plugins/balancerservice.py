@@ -33,7 +33,7 @@ class Options(usage.Options):
 class MyServiceMaker(object):
     implements(IServiceMaker, IPlugin)
     tapname = "balancer"
-    description = "TCP Round-Robin Balancer"
+    description = "TCP Proxy"
     options = Options
 
     def makeService(self, options):
