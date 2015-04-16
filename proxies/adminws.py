@@ -56,16 +56,17 @@ class AdminRealm(object):
             avatar.username = avatarId
             return defer.succeed((IAdminUser, avatar, noop))
 
-def parseBasicAuth(fn):
-    def _parse(request, *args, **kwds):
-        result = decode_basic_auth(request)
-        if result is None:
-            request.setResponseCode(UNAUTHORIZED)
-            request.setHeader("WWW-Authenticate", 'Basic realm="BindProxyWS"')
-            returnValue("""{"result": "not authorized"}""")
-        user, passwd = result
-        return fn(request, user, passwd, *args, **kwds)
-    return _parse
+class RESTError(Exception):
+    pass
+
+def parseBasicAuth(request):
+    result = decode_basic_auth(request)
+    if result is None:
+        request.setResponseCode(UNAUTHORIZED)
+        request.setHeader("WWW-Authenticate", 'Basic realm="BindProxyWS"')
+        raise RESTError("""{"result": "not authorized"}""")
+    user, passwd = result
+    return user, passwd
 
 def authenticate(request, user, passwd, portal):
     client_ip = request.getClientIP()
@@ -76,34 +77,39 @@ def authenticate(request, user, passwd, portal):
                 "[ERROR] client_ip={client_ip}, login={login}: "
                 "Unauthorized login attempt to admin web service.\n{err}").format(
             client_ip=client_ip, login=user, err=str(ex)))
-         request.setResponseCode(UNAUTHORIZED)
+        request.setResponseCode(UNAUTHORIZED)
         returnValue("""{"result": "not authorized"}""")
     except Exception as ex:
         log.msg("[ERROR] {0}".format(str(ex)))
         request.setResponseCode(500)
         returnValue('''{"result": "error"}''')
 
+def restwrap(fn):
+    def _inner(*args, **kwds):
+        try:
+            return fn(*args, **kwds)
+        except RESTError as ex:
+            return str(ex)
+    return _inner
+
 
 class AdminWebService(object):
     app = Klein()
-    dispatcher = None
 
-    def __init__(self, portal):
+    def __init__(self, portal, dispatcher):
         self.portal = portal
-
-    def dispatcherCallback(self, dispatcher):
         self.dispatcher = dispatcher
 
     @app.route('/netmap', methods=['DELETE'])
+    @restwrap
     @inlineCallbacks
-    @parseBasicAuth
-    def netmap_DELETE(self, request, user, passwd):
+    def netmap_DELETE(self, request):
         request.setHeader("Content-Type", "application/json")
+        user, passwd = parseBasicAuth(request)
         authenticate(request, user, passwd, self.portal)
         client_ip = request.getClientIP()
         dispatcher = self.dispatcher
-        if dispatcher is not None:
-            dispatcher.netmap = None
+        dispatcher.netmap = None
         log.msg((
                 "[INFO] client_ip={client_ip}, login={login}: "
                 "Successfully removed netmap.").format(
@@ -125,11 +131,11 @@ class AdminWebService(object):
         return '''{"result": "error"}'''
         
              
-def make_ws(portal):
+def make_ws(portal, dispatcher):
     """
-    Create and return the web service site.
+    Create and return the web service site, and web service.
     """
-    ws = AdminWebService(bindCache, portal)
+    ws = AdminWebService(portal, dispatcher)
     root = ws.app.resource()
     site = Site(root)
-    return site
+    return (site, ws)

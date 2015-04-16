@@ -11,6 +11,7 @@ from twisted.internet.endpoints import serverFromString
 from twisted.internet.protocol import Factory
 from twisted.protocols.portforward import ProxyServer, ProxyFactory
 from twisted.python import log
+from proxies.adminws import make_ws
 
 class Balancer(Factory):
     """
@@ -23,26 +24,22 @@ class Balancer(Factory):
     `dst_port` is the remote port.
     """
     def __init__(self, hostports, netmap=None):
-        self.hostports = hostports
-        self.netmap = netmap
+        self.setHostports(hostports)
+        self.setNetmap(netmap)
 
-    @property
-    def hostports(self):
-        return list(self.hostports)
+    def getHostports(self):
+        return list(self._hostports)
 
-    @hostports.setter
-    def hostports(self, value):
+    def setHostports(self, value):
         self.factories = []
         self._hostports = value
-        for (host, port) in hostports:
+        for (host, port) in value:
             self.factories.append(ProxyFactory(host, port))
 
-    @property
-    def netmap(self):
+    def getNetmap(self):
         return list((str(nw), p, dh, dp) for nw, p, dh, dp in self._netmap)
 
-    @netmap.setter
-    def netmap(self, value):
+    def setNetmap(self, value):
         if value is None:
             self._netmap = None
             self._netmap_factories = {}
@@ -53,17 +50,18 @@ class Balancer(Factory):
     def match_netmap(self, ipaddr, port):
         address = IPAddress(ipaddr)
         netmap = self._netmap
-        for nw, p, dh, dp in netmap:
-            if address.value & network.value != network.value:
-                continue 
-            if p == '*' or p == port:
-                key = (dh, dp)
-                factories = self._netmap_factories
-                factory = factories.get(key, None)
-                if factory is None:
-                    factory = ProxyFactory(dh, dp)
-                    factories[key] = factory
-                return factory
+        if netmap is not None:
+            for nw, p, dh, dp in netmap:
+                if address.value & network.value != network.value:
+                    continue 
+                if p == '*' or p == port:
+                    key = (dh, dp)
+                    factories = self._netmap_factories
+                    factory = factories.get(key, None)
+                    if factory is None:
+                        factory = ProxyFactory(dh, dp)
+                        factories[key] = factory
+                    return factory
         return None
 
     def buildProtocol(self, addr):
@@ -82,27 +80,36 @@ class Balancer(Factory):
 
 
 class BalancerService(service.Service):
-    def __init__(self, endpoint, hostports, netmap=None, startedCallback=None):
+    def __init__(self, endpoint, hostports, netmap=None, admin_endpoint=None, admin_portal=None):
         self.endpoint = endpoint
         self.hostports = hostports
         self.netmap = netmap
+        self.admin_endpoint = admin_endpoint
+        self.admin_portal = admin_portal
+        self._ports = {}
 
     def startService(self):
         factory = Balancer(self.hostports, self.netmap)
+        admin_portal = self.admin_portal
+        admin_endpoint = self.admin_endpoint
+        if admin_portal is not None and admin_endpoint is not None:
+            admin_service, admin_website = make_ws(admin_portal, factory)
+            ep = serverFromString(reactor, admin_endpoint)
+            d0 = ep.listen(admin_service)
+            d0.addCallback(self.set_listening_port, port_type='admin')            
         ep = serverFromString(reactor, self.endpoint)
         d = ep.listen(factory)
-        d.addCallback(self.set_listening_port)
-        if startedCallback is not None:
-            d2 = defer.Deferred()
-            d2.addCallback(startedCallback, factory)
+        d.addCallback(self.set_listening_port, port_type='proxy')
+
+    def set_listening_port(self, port, port_type):
+        self._ports[port_type] = port
 
     def stopService(self):
         """
         Stop the service.
         """
-        if self._port is not None:
-            return self._port.stopListening()
-
-    def set_listening_port(self, port):
-        self._port = port
+        rval = True
+        for port_type, port in self._ports.iteritems():
+            rval = (rval and port.stopListening())
+        return rval
 
