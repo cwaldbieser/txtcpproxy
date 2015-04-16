@@ -3,6 +3,7 @@ from __future__ import print_function
 import base64
 import exceptions
 import hashlib
+import inspect
 import json
 from klein import Klein
 from twisted.cred import error
@@ -11,7 +12,7 @@ from twisted.cred.portal import IRealm
 from twisted.internet import defer
 from twisted.internet.defer import inlineCallbacks, returnValue
 from twisted.python import log
-from  twisted.web.http import BAD_REQUEST, UNAUTHORIZED
+from  twisted.web.http import BAD_REQUEST, UNAUTHORIZED, NOT_ALLOWED
 from twisted.web.server import Site
 import werkzeug.exceptions
 from zope.interface import Interface, Attribute, implements
@@ -57,18 +58,30 @@ class AdminRealm(object):
             return defer.succeed((IAdminUser, avatar, noop))
 
 class RESTError(Exception):
-    pass
+    @property
+    def statusCode(self):
+        return self.args[0]
+
+    def __str__(self):
+        args = self.args[1:]
+        if len(args) == 1:
+            return json.dumps(args[0])
+        else:
+            return json.dumps(args)
+
 
 def parseBasicAuth(request):
     result = decode_basic_auth(request)
     if result is None:
         request.setResponseCode(UNAUTHORIZED)
         request.setHeader("WWW-Authenticate", 'Basic realm="BindProxyWS"')
-        raise RESTError("""{"result": "not authorized"}""")
+        raise RESTError(UNAUTHORIZED, {"result": "not authorized"})
     user, passwd = result
     return user, passwd
 
+@inlineCallbacks
 def authenticate(request, user, passwd, portal):
+    log.msg("[INFO] Attempting to authenticate '{0}' ...".format(user))
     client_ip = request.getClientIP()
     try:
         iface, avatar, logout = yield portal.login(UsernamePassword(user, passwd), None, IAdminUser)
@@ -77,20 +90,10 @@ def authenticate(request, user, passwd, portal):
                 "[ERROR] client_ip={client_ip}, login={login}: "
                 "Unauthorized login attempt to admin web service.\n{err}").format(
             client_ip=client_ip, login=user, err=str(ex)))
-        request.setResponseCode(UNAUTHORIZED)
-        returnValue("""{"result": "not authorized"}""")
-    except Exception as ex:
+        raise RESTError(UNAUTHORIZED, {"result": "not authorized"})
+    except (Exception,) as ex:
         log.msg("[ERROR] {0}".format(str(ex)))
-        request.setResponseCode(500)
-        returnValue('''{"result": "error"}''')
-
-def restwrap(fn):
-    def _inner(*args, **kwds):
-        try:
-            return fn(*args, **kwds)
-        except RESTError as ex:
-            return str(ex)
-    return _inner
+        raise RESTError(500, {'result': 'error'})
 
 
 class AdminWebService(object):
@@ -100,21 +103,61 @@ class AdminWebService(object):
         self.portal = portal
         self.dispatcher = dispatcher
 
-    @app.route('/netmap', methods=['DELETE'])
-    @restwrap
+    @app.route('/netmap', methods=['GET', 'DELETE', 'PUT'])
     @inlineCallbacks
-    def netmap_DELETE(self, request):
-        request.setHeader("Content-Type", "application/json")
+    def netmap(self, request):
+        method = request.method
+        func_name = inspect.currentframe().f_code.co_name
+        fn = getattr(self, '{0}_{1}'.format(func_name, method), None)
+        if fn is None:
+            request.setResponseCode(NOT_ALLOWED)
+            returnValue(json.dumps({'result': 'not allowed'}))
         user, passwd = parseBasicAuth(request)
-        authenticate(request, user, passwd, self.portal)
+        log.msg("[DEBUG] Before authenticate() ...") 
+        yield authenticate(request, user, passwd, self.portal)
+        log.msg("[DEBUG] After authenticate() ...") 
+        returnValue(fn(request, user, passwd))
+
+    def netmap_GET(self, request, user, passwd):
+        request.setHeader("Content-Type", "application/json")
         client_ip = request.getClientIP()
         dispatcher = self.dispatcher
-        dispatcher.netmap = None
+        netmap = dispatcher.getNetmap()
+        log.msg((
+                "[INFO] client_ip={client_ip}, login={login}: "
+                "Successfully retrieved netmap.").format(
+                    client_ip=client_ip, login=user))
+        return json.dumps(netmap)
+
+    def netmap_DELETE(self, request, user, passwd):
+        request.setHeader("Content-Type", "application/json")
+        client_ip = request.getClientIP()
+        dispatcher = self.dispatcher
+        dispatcher.setNetmap(None)
         log.msg((
                 "[INFO] client_ip={client_ip}, login={login}: "
                 "Successfully removed netmap.").format(
-                    client_ip=client_ip, login=user, dn=dn))
-        returnValue('''{"result": "ok"}''')
+                    client_ip=client_ip, login=user))
+        return json.dumps({"result": "ok"})
+
+    def netmap_PUT(self, request, user, passwd):
+        request.setHeader("Content-Type", "application/json")
+        client_ip = request.getClientIP()
+        bad_request = RESTError(BAD_REQUEST, {'result': 'bad request'})
+        try:
+            o = json.load(request.content)
+        except ValueError as ex:
+            raise bad_request
+        dispatcher = self.dispatcher
+        try:
+            dispatcher.setNetmap(netmap)
+        except ValueError:
+            raise bad_request
+        log.msg((
+                "[INFO] client_ip={client_ip}, login={login}: "
+                "Successfully set netmap.").format(
+                    client_ip=client_ip, login=user))
+        return json.dumps({"result": "ok"})
 
     @app.handle_errors(werkzeug.exceptions.NotFound)
     def error_handler_404(self, request, failure):
@@ -124,11 +167,16 @@ class AdminWebService(object):
         return '''{"result": "not found"}'''
 
     @app.handle_errors
-    def error_handler_500(self, request, failure):
-        request.setResponseCode(500)
-        log.msg("[ERROR] http_status=500, client_ip={client_ip}: {err}".format(
-            client_ip=request.getClientIP(), err=str(failure)))
-        return '''{"result": "error"}'''
+    def error_handler(self, request, failure):
+        if failure.type == RESTError:
+            value = failure.value
+            request.setResponseCode(value.statusCode)
+            return str(value)
+        else:
+            request.setResponseCode(500)
+            log.msg("[ERROR] http_status=500, client_ip={client_ip}: {err}".format(
+                client_ip=request.getClientIP(), err=str(failure)))
+            return json.dumps({"result": "error"})
         
              
 def make_ws(portal, dispatcher):

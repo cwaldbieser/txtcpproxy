@@ -31,20 +31,25 @@ class Balancer(Factory):
         return list(self._hostports)
 
     def setHostports(self, value):
-        self.factories = []
-        self._hostports = value
+        factories = []
         for (host, port) in value:
-            self.factories.append(ProxyFactory(host, port))
+            factories.append(ProxyFactory(host, port))
+        self._hostports = value
+        self.factories = factories
 
     def getNetmap(self):
-        return list((str(nw), p, dh, dp) for nw, p, dh, dp in self._netmap)
+        netmap = self._netmap
+        if netmap is None:
+            return []
+        return list((str(nw), p, dh, dp) for nw, p, dh, dp in netmap)
 
     def setNetmap(self, value):
         if value is None:
             self._netmap = None
             self._netmap_factories = {}
             return
-        self._netmap = [(IPNetwork(nw), p, dh, dp) for nw, p, dh, dp in value]
+        netmap = [(IPNetwork(nw), p, dh, dp) for nw, p, dh, dp in value]
+        self._netmap = netmap
         self._netmap_factories = {}
 
     def match_netmap(self, ipaddr, port):
