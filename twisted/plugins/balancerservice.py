@@ -16,6 +16,9 @@ from zope.interface import implements
 
 class Options(usage.Options, strcred.AuthOptionMixin):
     supportedInterfaces = (credentials.IUsernamePassword,)
+    optFlags = [
+            ["debug", "d", "Debugging output."],
+        ]
     optParameters = [
                         ["endpoint", "e", "tcp:10389", "The endpoint listen on (default 'tcp:10389')."],
                         ["hostport", "H", None, "Host and port separated by a colon.  "
@@ -47,6 +50,7 @@ class MyServiceMaker(object):
         endpoint_str = options['endpoint']
         admin_endpoint_str = options['admin-endpoint']
         temp = options['hostport']
+        debug = options['debug']
         hostports = []
         for x in temp:
             parts = x.split(":", 1)
@@ -63,7 +67,8 @@ class MyServiceMaker(object):
             endpoint_str, 
             hostports, 
             admin_endpoint=admin_endpoint_str, 
-            admin_portal=admin_portal)
+            admin_portal=admin_portal,
+            debug=debug)
         return service
 
 

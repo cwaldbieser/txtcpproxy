@@ -3,7 +3,6 @@ from __future__ import print_function
 import base64
 import exceptions
 import hashlib
-import inspect
 import json
 from klein import Klein
 from twisted.cred import error
@@ -12,7 +11,7 @@ from twisted.cred.portal import IRealm
 from twisted.internet import defer
 from twisted.internet.defer import inlineCallbacks, returnValue
 from twisted.python import log
-from  twisted.web.http import BAD_REQUEST, UNAUTHORIZED, NOT_ALLOWED
+from  twisted.web.http import BAD_REQUEST, UNAUTHORIZED, NOT_ALLOWED, NOT_FOUND
 from twisted.web.server import Site
 import werkzeug.exceptions
 from zope.interface import Interface, Attribute, implements
@@ -97,26 +96,70 @@ def authenticate(request, user, passwd, portal):
 
 
 class AdminWebService(object):
+    debug = False
     app = Klein()
+    valid_funcs = frozenset([
+        'hostports',
+        'netmap'])
 
     def __init__(self, portal, dispatcher):
         self.portal = portal
         self.dispatcher = dispatcher
 
-    @app.route('/netmap', methods=['GET', 'DELETE', 'PUT'])
+    @app.route('/<string:funcname>', methods=['GET', 'DELETE', 'PUT'])
     @inlineCallbacks
-    def netmap(self, request):
+    def dispatcher(self, request, funcname):
+        debug = self.debug
+        if funcname not in self.valid_funcs:
+            request.setResponseCode(NOT_FOUND)
+            returnValue(json.dumps({'result': 'not found'}))
         method = request.method
-        func_name = inspect.currentframe().f_code.co_name
-        fn = getattr(self, '{0}_{1}'.format(func_name, method), None)
+        if debug:
+            log.msg("[DEBUG] Received request for resource '/{0}_{1}'.".format(funcname, method))
+        fn = getattr(self, '{0}_{1}'.format(funcname, method), None)
         if fn is None:
             request.setResponseCode(NOT_ALLOWED)
             returnValue(json.dumps({'result': 'not allowed'}))
         user, passwd = parseBasicAuth(request)
-        log.msg("[DEBUG] Before authenticate() ...") 
         yield authenticate(request, user, passwd, self.portal)
-        log.msg("[DEBUG] After authenticate() ...") 
         returnValue(fn(request, user, passwd))
+
+    def hostports_GET(self, request, user, passwd):
+        request.setHeader("Content-Type", "application/json")
+        client_ip = request.getClientIP()
+        dispatcher = self.dispatcher
+        hostPorts = dispatcher.getHostPorts()
+        log.msg((
+                "[INFO] client_ip={client_ip}, login={login}: "
+                "Successfully retrieved hostports.").format(
+                    client_ip=client_ip, login=user))
+        return json.dumps(hostPorts)
+
+    def hostports_DELETE(self, request, user, passwd):
+        request.setHeader("Content-Type", "application/json")
+        client_ip = request.getClientIP()
+        dispatcher = self.dispatcher
+        dispatcher.setHostPorts(None)
+        log.msg((
+                "[INFO] client_ip={client_ip}, login={login}: "
+                "Successfully removed hostports.").format(
+                    client_ip=client_ip, login=user))
+        return json.dumps({"result": "ok"})
+
+    def hostports_PUT(self, request, user, passwd):
+        request.setHeader("Content-Type", "application/json")
+        client_ip = request.getClientIP()
+        try:
+            o = json.load(request.content)
+        except ValueError as ex:
+            raise bad_request
+        dispatcher = self.dispatcher
+        dispatcher.setHostPorts(o)
+        log.msg((
+                "[INFO] client_ip={client_ip}, login={login}: "
+                "Successfully set hostports.").format(
+                    client_ip=client_ip, login=user))
+        return json.dumps({"result": "ok"})
 
     def netmap_GET(self, request, user, passwd):
         request.setHeader("Content-Type", "application/json")
