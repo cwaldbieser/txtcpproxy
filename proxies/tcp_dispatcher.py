@@ -72,7 +72,7 @@ class Balancer(Factory):
         netmap = self._netmap
         if netmap is not None:
             for nw, p, dh, dp in netmap:
-                if address.value & network.value != network.value:
+                if address.value & nw.value != nw.value:
                     continue 
                 if p == '*' or p == port:
                     key = (dh, dp)

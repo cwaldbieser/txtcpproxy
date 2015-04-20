@@ -190,10 +190,11 @@ class AdminWebService(object):
         try:
             o = json.load(request.content)
         except ValueError as ex:
+            log.msg("[ERROR] Invalid netmap: {0}".format(str(ex)))
             raise bad_request
         dispatcher = self.dispatcher
         try:
-            dispatcher.setNetmap(netmap)
+            dispatcher.setNetmap(o)
         except ValueError:
             raise bad_request
         log.msg((
